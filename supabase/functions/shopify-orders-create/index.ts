@@ -6,42 +6,79 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
 
-console.log("Hello from Functions!");
-
-// This endpoint uses 'publishable' | 'secret' access, apiKey is required.
-// Use publishable for Client-facing, key-validated endpoints
-// Use secret for Server-to-server, internal calls
 export default {
   fetch: withSupabase({ auth: ["none"] }, async (req, ctx) => {
-    // Called by another service with a secret key
-    // ctx.supabaseAdmin bypasses RLS — use for privileged operations
-    /*
-    if (ctx.authMode === "secret") {
-      const { user_id } = await req.json();
-      const { data } = await ctx.supabaseAdmin.auth.admin.getUserById(user_id);
-
-      return Response.json({
-        email: data?.user?.email,
-      });
-    }
-    */
-
     const rawBody = await req.text();
 
     const hmacHeader = req.headers.get("x-shopify-hmac-sha256");
 
     const secret = Deno.env.get("SHOPIFY_API_SECRET");
 
+    const webhookHeader = req.headers.get("x-shopify-webhook-id");
+
+    const topicHeader = req.headers.get("x-shopify-topic");
+
+    const shopDomainHeader = req.headers.get("x-shopify-shop-domain");
+
     if (!hmacHeader) return new Response("Unauthorized", { status: 401 });
 
-    if (!secret) return new Response("Authorized", { status: 200 });
+    if (!secret) return new Response("Server Misconfigured", { status: 500 });
 
     const ok = await verifyShopifyHmac(rawBody, hmacHeader, secret);
     if (!ok) {
       return new Response("Unauthorized", { status: 401 });
-    } else {
-      return new Response("Authorized", { status: 200 });
     }
+
+    if (!webhookHeader) return new Response("Bad Request", { status: 400 });
+
+    if (!topicHeader) return new Response("Bad Request", { status: 400 });
+
+    if (!shopDomainHeader) return new Response("Bad Request", { status: 400 });
+
+    const order = JSON.parse(rawBody);
+
+    const { error } = await ctx.supabaseAdmin.from("webhook_events")
+      .insert({
+        webhook_id: webhookHeader,
+        topic: topicHeader,
+        shop_domain: shopDomainHeader,
+        payload: order,
+      });
+
+    if (error) {
+      if (error.code !== "23505") {
+        return new Response("Error", { status: 500 });
+      }
+    }
+
+    const protection = order.line_items?.find(
+      (item: { sku: string | null }) => item.sku === "ORDER-PROTECTION",
+    );
+
+    if (!protection) {
+      return new Response("OK", { status: 200 });
+    }
+
+    const { error: orderError } = await ctx.supabaseAdmin.from(
+      "protected_orders",
+    )
+      .insert({
+        shop_domain: shopDomainHeader,
+        shopify_order_id: String(order.id),
+        order_name: order.name,
+        premium_amount: protection.price,
+        order_total: order.total_price,
+        currency: order.currency,
+      });
+
+    if (orderError) {
+      if (orderError.code === "23505") {
+        return new Response("Duplicate", { status: 200 });
+      }
+      return new Response("Error", { status: 500 });
+    }
+
+    return new Response("OK", { status: 200 });
   }),
 };
 
@@ -69,13 +106,3 @@ async function verifyShopifyHmac(
   );
   return hmacHeader === convertBase64;
 }
-/* To invoke locally:
-
-  1. Run `supabase start` (see: https://supabase.com/docs/reference/cli/supabase-start)
-  2. Make an HTTP request:
-
-  curl -i --location --request POST 'http://127.0.0.1:54321/functions/v1/shopify-orders-create' \
-    --header 'apiKey: sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH' \
-    --data '{"name":"Functions"}'
-
-*/
