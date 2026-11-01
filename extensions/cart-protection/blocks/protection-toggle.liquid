@@ -1,0 +1,30 @@
+{% assign op_variant = all_products['order-protection'].selected_or_first_available_variant %}
+
+{% assign op_in_cart = false %}
+{% for item in cart.items %}
+  {% if item.sku == 'ORDER-PROTECTION' %}
+    {% assign op_in_cart = true %}
+    {% break %}
+  {% endif %}
+{% endfor %}
+
+{% if op_variant %}
+  <label>
+    <input
+      type="checkbox"
+      id="order-protection-toggle"
+      data-variant-id="{{ op_variant.id }}"
+      {% if op_in_cart %}checked{% endif %}
+    >
+    Order Protection – {{ op_variant.price | money }}
+  </label>
+{% endif %}
+
+{% schema %}
+{
+  "name": "Order Protection",
+  "target": "section",
+  "javascript": "protection-toggle.js",
+  "settings": []
+}
+{% endschema %}
